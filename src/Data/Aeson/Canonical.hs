@@ -46,13 +46,14 @@ import Data.List           ( (++), foldl, foldl', intercalate
                            , length, map, zip, genericLength
                            )
 import Data.Maybe          ( Maybe(Nothing, Just), fromMaybe )
-import Prelude             ( String, (-), Integer, Int, fromIntegral, error, undefined, zipWith, const, seq, foldr, Bool, Eq )
+import Prelude             ( String, (-), Integer, Int, fromIntegral, error, undefined, zipWith, const, seq, foldr, Bool, Eq, Ord )
 import Text.Printf         ( printf )
 import Text.Show           ( show )
 #if __GLASGOW_HASKELL__ < 700
 import Control.Monad       ( (>>=) )
 import Prelude             ( fromInteger )
 #endif
+import qualified Data.Set as S
 import qualified Data.Map as M 
 -- from unordered-containers:
 import qualified Data.HashMap.Strict as H
@@ -77,6 +78,11 @@ instance (Aeson a) => Aeson [a] where
   parseAeson (Array a) = mapM parseAeson (V.toList a)
   parseAeson v         = typeMismatch "[a]" v
   {-# INLINE parseAeson #-}
+
+instance (Ord a, Aeson a) => Aeson (S.Set a) where
+  toAeson             = toAeson . S.toList
+  {-# INLINE toAeson #-}
+  parseAeson x        = S.fromList <$> parseAeson x
 
 instance Aeson () where
   toAeson             = toJSON
