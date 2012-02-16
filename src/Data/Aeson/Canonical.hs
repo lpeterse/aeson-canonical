@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP, NoImplicitPrelude, TemplateHaskell, FlexibleInstances #-}
+{-# LANGUAGE CPP, TemplateHaskell, FlexibleInstances, TupleSections #-}
 
 {-|
 Module:      Data.Aeson.Canonical
@@ -35,18 +35,17 @@ import Data.Aeson.Types ( Value(..), Parser, typeMismatch, Pair )
 -- from base:
 import Control.Applicative ( pure, (<$>), (<*>) )
 import Control.Monad       ( return, mapM, liftM2, fail )
-import Data.Bool           ( otherwise )
-import Data.Eq             ( (==) )
+import Data.Bool           ( Bool (..), otherwise )
+import Data.Eq             ( (==), (/=) )
 import Data.Function       ( ($), (.), id )
 import Data.Functor        ( fmap )
 import Data.Hashable
 import Data.Default
 import Data.Traversable    ( traverse )
 import Data.List           ( (++), foldl, foldl', intercalate
-                           , length, map, zip, genericLength
+                           , length, map, zip, zip3, genericLength
                            )
 import Data.Maybe          ( Maybe(Nothing, Just), fromMaybe )
-import Prelude             ( String, (-), Integer, Int, fromIntegral, error, undefined, zipWith, const, seq, foldr, Bool, Eq, Ord )
 import Text.Printf         ( printf )
 import Text.Show           ( show )
 #if __GLASGOW_HASKELL__ < 700
@@ -114,7 +113,6 @@ instance Aeson Bool where
   parseAeson          = parseJSON
   {-# INLINE parseAeson #-}
 
-
 instance (Aeson a) => Aeson (Maybe a) where
   toAeson Nothing     = Null
   toAeson (Just x)    = toAeson x
@@ -164,31 +162,6 @@ instance Aeson Value where
   {-# INLINE toAeson #-}
   parseAeson a = pure a
   {-# INLINE parseAeson #-}
-
-(.=) :: Aeson a => T.Text -> a -> Pair
-name .= value = (name, toAeson value)
-{-# INLINE (.=) #-}
-
-(.:?) :: (Aeson a) => Object -> T.Text -> Parser (Maybe a)
-obj .:? key = case H.lookup key obj of
-               Nothing -> pure Nothing
-               Just v  -> Just <$> parseAeson v
-{-# INLINE (.:?) #-}
-
-(.:!) :: (Aeson a, Default a) => Object -> T.Text -> Parser a 
-o .:! t = fromMaybe def <$> (o .:? t)
-{-# INLINE (.:!) #-}
-
--- | Transform the keys and values of a 'H.HashMap'.
-mapKeyVal :: (Eq k2, Hashable k2) => (k1 -> k2) -> (v1 -> v2)
-          -> H.HashMap k1 v1 -> H.HashMap k2 v2
-mapKeyVal fk kv = H.foldrWithKey (\k v -> H.insert (fk k) (kv v)) H.empty
-{-# INLINE mapKeyVal #-}
-
--- | Transform the keys of a 'H.HashMap'.
-mapKey :: (Eq k2, Hashable k2) => (k1 -> k2) -> H.HashMap k1 v -> H.HashMap k2 v
-mapKey fk = mapKeyVal fk id
-{-# INLINE mapKey #-}
 
 deriveAeson :: (String -> String)
              -- ^ Function to change field names.
@@ -244,62 +217,25 @@ consToJSON withField cons = do
                                                exp
                                     ]
 
--- | Generates code to generate the JSON encoding of a single constructor.
 encodeArgs :: (Q Exp -> Q Exp) -> (String -> String) -> Con -> Q Match
--- Nullary constructors. Generates code that explicitly matches against the
--- constructor even though it doesn't contain data. This is useful to prevent
--- type errors.
-
--- Polyadic constructors with special case for unary constructors.
-encodeArgs withExp _ (NormalC conName ts) = do
-    let len = length ts
-    args <- mapM newName ["arg" ++ show n | n <- [1..len]]
-    let js = [ infixApp ([e|T.pack|] `appE` (litE $ stringL $ ('_':) $ show n))
+encodeArgs withExp fField constr = 
+ do args       <- case constr of
+                    (NormalC _      ts) -> sequence [ (,'_':(show i),t)        <$> newName "arg" | (i,t)   <- zip [1..] (map snd ts) ]
+                    (RecC    _      ts) -> sequence [ (,fField $ nameBase n,t) <$> newName "arg" | (n,_,t) <- ts                     ]
+    let js = [ infixApp ([e|T.pack|] `appE` (litE $ stringL $ field))
                         [e|(.=)|]
                         (varE arg)
-             | (arg, n) <- zip args [(0 :: Integer)..]
+             | (arg, field, t) <- args
+             , not (isMaybe t)
              ]
              ++
              [ infixApp ([e|T.pack|] `appE` litE (stringL "_"))
                         [e|(.=)|]
-                        ([e|T.pack|] `appE` (litE $ stringL $ nameBase conName))
+                        ([e|T.pack|] `appE` (litE $ stringL $ nameBase $ getConName constr))
              ]
- 
-    match (conP conName $ map varP args)
+    match (conP (getConName constr) $ map varP $ map (\(a,_,_)->a) args)
           (normalB $ withExp $ [e|object|] `appE` listE js)
           []
--- Records.
-encodeArgs withExp withField (RecC conName ts) = do
-    args <- mapM newName ["arg" ++ show n | (_, n) <- zip ts [0 :: Integer ..]]
-    let js = [ infixApp ([e|T.pack|] `appE` fieldNameExp withField field)
-                        [e|(.=)|]
-                        (varE arg)
-             | (arg, (field, _, _)) <- zip args ts
-             ]
-             ++
-             [ infixApp ([e|T.pack|] `appE` litE (stringL "_"))
-                        [e|(.=)|]
-                        ([e|T.pack|] `appE` (litE $ stringL $ nameBase conName))
-             ]
-    match (conP conName $ map varP args)
-          (normalB $ withExp $ [e|object|] `appE` listE js)
-          []
--- Infix constructors.
-encodeArgs withExp _ (InfixC _ conName _) = do
-    al <- newName "argL"
-    ar <- newName "argR"
-    match (infixP (varP al) conName (varP ar))
-          ( normalB
-          $ withExp
-          $ [e|toAeson|] `appE` listE [ [e|toAeson|] `appE` varE a
-                                     | a <- [al,ar]
-                                     ]
-          )
-          []
--- Existentially quantified constructors.
-encodeArgs withExp withField (ForallC _ _ con) =
-    encodeArgs withExp withField con
-
 
 parseAesonClauses :: Name -> (String -> String) -> [Con] -> [Q Clause] 
 parseAesonClauses tName withField cons
@@ -343,16 +279,16 @@ parseAesonClauses tName withField cons
       = do let ts = case con of
                      (NormalC _ xs) -> [(mkName $ ('_':) $ show i,t)|(i,(_,t)) <- zip [1..] xs]
                      (RecC _ xs)    -> map (\(n,_,t)->(n,t)) xs
-                     _              -> error "8234"
-           let xs = [ [|lookupField|]
-                      `appE` (litE $ stringL $ show tName)
-                      `appE` (litE $ stringL $ nameBase $ getConName con)
-                      `appE` (varE obj)
-                      `appE` ( [e|T.pack|]
-                               `appE`
-                               fieldNameExp withField field
-                             )
-                    | (field,_) <- ts
+           let xs = [ let fieldName =  [e|T.pack|] `appE` fieldNameExp withField field
+                      in  caseE
+                            ( [|H.lookup|] `appE` fieldName `appE` varE obj )
+                            [ (\e-> match [p|Nothing|] e []) $ normalB $ do b <- isClassInstance ''Default [t]
+                                                                            if b || isMaybe t
+                                                                              then [|return def|] -- 'Nothing == def' for 'Maybe a'!
+                                                                              else [|\x-> fail $ "Missing field '" ++ x ++ "'."|] `appE` fieldNameExp withField field 
+                            , newName "x" >>= \x-> match (conP 'Just [varP x]) (normalB $ [|error . show|] `appE` varE x) [] 
+                            ]
+                    | (field, t) <- ts
                     ]
            args <- mapM (const $ newName "x") ts
            doE $ ( zipWith
@@ -377,63 +313,16 @@ parseAesonClauses tName withField cons
                  ]
 
 
--- | Generates code to parse the JSON encoding of a single constructor.
-parseArgs :: Name -- ^ Name of the type to which the constructor belongs.
-          -> (String -> String) -- ^ Function to change field names.
-          -> Con -- ^ Constructor for which to generate JSON parsing code.
-          -> [Q Match]
-parseArgs tName withField con =
-    [ do let conName = case con of
-                         (NormalC c _) -> c
-                         (RecC c _)    -> c
-                         _             -> error "23489723"
-         let ts      = case con of
-                         (NormalC _ xs) -> [(mkName $ ('_':) $ show i,s,t)|(i,(s,t)) <- zip [1..] xs]
-                         (RecC _ xs)    -> xs
-                         _              -> error "8234"
-         obj <- newName "recObj"
-         let x:xs = [ [|lookupField|]
-                      `appE` (litE $ stringL $ show tName)
-                      `appE` (litE $ stringL $ nameBase conName)
-                      `appE` (varE obj)
-                      `appE` ( [e|T.pack|]
-                               `appE`
-                               fieldNameExp withField field
-                             )
-                    | (field, _, _) <- ts
-                    ]
-         match (conP 'Object [varP obj])
-               ( normalB $ condE ( infixApp ([|H.size|] `appE` varE obj)
-                                            [|(==)|]
-                                            (litE $ integerL $ genericLength ts)
-                                 )
-                                 ( foldl' (\a b -> infixApp a [|(<*>)|] b)
-                                          (infixApp (conE conName) [|(<$>)|] x)
-                                          xs
-                                 )
-                                 ( parseTypeMismatch tName conName
-                                     ( litE $ stringL $ "Object with "
-                                                        ++ show (length ts)
-                                                        ++ " name/value pairs"
-                                     )
-                                     ( infixApp ([|show . H.size|] `appE` varE obj)
-                                                [|(++)|]
-                                                (litE $ stringL $ " name/value pairs")
-                                     )
-                                 )
-               )
-               []
-    , let conName = case con of
-                         (NormalC c _) -> c
-                         (RecC c _)    -> c
-                         _             -> error "23489723"
-      in  matchFailed tName conName "Object"
-    ]
-
-
 --------------------------------------------------------------------------------
 -- Parsing errors
 --------------------------------------------------------------------------------
+
+isMaybe :: Type -> Bool
+isMaybe (AppT a _) = case a of
+                      (ConT n) -> n == ''Maybe 
+                      _        -> False
+isMaybe _          = False
+
 
 matchFailed :: Name -> Name -> String -> MatchQ
 matchFailed tName conName expected = do
@@ -548,5 +437,30 @@ valueConName (String _) = "String"
 valueConName (Number _) = "Number"
 valueConName (Bool   _) = "Boolean"
 valueConName Null       = "Null"
+
+(.=) :: Aeson a => T.Text -> a -> Pair
+name .= value = (name, toAeson value)
+{-# INLINE (.=) #-}
+
+(.:?) :: (Aeson a) => Object -> T.Text -> Parser (Maybe a)
+obj .:? key = case H.lookup key obj of
+               Nothing -> pure Nothing
+               Just v  -> Just <$> parseAeson v
+{-# INLINE (.:?) #-}
+
+(.:!) :: (Aeson a, Default a) => Object -> T.Text -> Parser a 
+o .:! t = fromMaybe def <$> (o .:? t)
+{-# INLINE (.:!) #-}
+
+-- | Transform the keys and values of a 'H.HashMap'.
+mapKeyVal :: (Eq k2, Hashable k2) => (k1 -> k2) -> (v1 -> v2)
+          -> H.HashMap k1 v1 -> H.HashMap k2 v2
+mapKeyVal fk kv = H.foldrWithKey (\k v -> H.insert (fk k) (kv v)) H.empty
+{-# INLINE mapKeyVal #-}
+
+-- | Transform the keys of a 'H.HashMap'.
+mapKey :: (Eq k2, Hashable k2) => (k1 -> k2) -> H.HashMap k1 v -> H.HashMap k2 v
+mapKey fk = mapKeyVal fk id
+{-# INLINE mapKey #-}
 
 
