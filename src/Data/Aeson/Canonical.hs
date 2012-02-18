@@ -286,7 +286,7 @@ parseAesonClauses tName withField cons
                                                                             if b || isMaybe t
                                                                               then [|return def|] -- 'Nothing == def' for 'Maybe a'!
                                                                               else [|\x-> fail $ "Missing field '" ++ x ++ "'."|] `appE` fieldNameExp withField field 
-                            , newName "x" >>= \x-> match (conP 'Just [varP x]) (normalB $ [|error . show|] `appE` varE x) [] 
+                            , newName "x" >>= \x-> match (conP 'Just [varP x]) (normalB $ [|parseAeson|] `appE` varE x) [] 
                             ]
                     | (field, t) <- ts
                     ]
